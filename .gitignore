@@ -1,0 +1,13 @@
+.DS_Store
+.build/
+.swiftpm/
+*.xcodeproj
+
+# worker
+worker/node_modules/
+worker/.wrangler/
+worker/.dev.vars
+
+# release staging
+dist/
+*.err

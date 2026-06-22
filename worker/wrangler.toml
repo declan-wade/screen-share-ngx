@@ -1,0 +1,19 @@
+name = "screenshare"
+main = "src/index.ts"
+compatibility_date = "2025-06-01"
+
+# Random-room store. Create with:
+#   wrangler kv namespace create ROOMS
+# then paste the returned id below.
+[[kv_namespaces]]
+binding = "ROOMS"
+id = "<YOUR_NAMESPACE_ID>"
+
+# Non-secret config.
+[vars]
+# CF_ACCOUNT_ID can live here (it's not sensitive) or be set as a secret.
+CF_ACCOUNT_ID = "<YOUR_ACCOUNT_ID>"
+
+# Secrets — set with `wrangler secret put <NAME>` (do NOT commit these):
+#   CF_STREAM_TOKEN   API token with Stream:Edit on this account
+#   SHARED_SECRET     bearer token the CLI must present to mint a room

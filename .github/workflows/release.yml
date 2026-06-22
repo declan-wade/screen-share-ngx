@@ -1,0 +1,120 @@
+name: Release
+
+# Build a macOS (Apple Silicon / arm64) binary and publish it as a GitHub
+# Release asset. Tag a commit to cut a release:
+#
+#     git tag v0.1.0 && git push origin v0.1.0
+#
+# A manual run (workflow_dispatch) builds the same artifact and uploads it as a
+# CI artifact without creating a release.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version label for the artifact (e.g. v0.1.0)"
+        required: false
+        default: "dev"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Apple-silicon runner.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pin to a Swift 5.10+ toolchain (Package.swift declares tools-version 5.10).
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      # Cache the (large) WebRTC binary artifact + SwiftPM caches across runs.
+      - name: Cache SwiftPM & WebRTC artifact
+        uses: actions/cache@v4
+        with:
+          path: |
+            .build/artifacts
+            ~/Library/Caches/org.swift.swiftpm
+            ~/.swiftpm
+          key: spm-${{ runner.os }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
+          restore-keys: spm-${{ runner.os }}-
+
+      - name: Resolve dependencies & patch WebRTC macOS headers
+        run: |
+          swift package resolve
+          ./scripts/patch-webrtc-headers.sh
+
+      - name: Build release
+        run: swift build -c release
+
+      - name: Stage & package
+        id: stage
+        run: |
+          set -euo pipefail
+          BIN_DIR="$(swift build -c release --show-bin-path)"
+          VERSION="${GITHUB_REF_NAME:-${{ github.event.inputs.tag }}}"
+          STAGE="screenshare-${VERSION}-macos-arm64"
+
+          mkdir -p "dist/${STAGE}"
+          cp "${BIN_DIR}/screenshare" "dist/${STAGE}/"
+          # The binary loads WebRTC via @rpath/@loader_path, so the framework
+          # must ship alongside it in the same directory.
+          cp -R "${BIN_DIR}/WebRTC.framework" "dist/${STAGE}/"
+          cp README.md "dist/${STAGE}/" 2>/dev/null || true
+
+          lipo -info "dist/${STAGE}/screenshare"
+
+          # Ad-hoc sign (un-notarized — consumers clear the quarantine flag).
+          codesign --force --sign - "dist/${STAGE}/WebRTC.framework" || true
+          codesign --force --sign - "dist/${STAGE}/screenshare" || true
+
+          ( cd dist && tar -czf "${STAGE}.tar.gz" "${STAGE}" )
+          shasum -a 256 "dist/${STAGE}.tar.gz" | tee "dist/${STAGE}.tar.gz.sha256"
+
+          {
+            echo "tarball=dist/${STAGE}.tar.gz"
+            echo "checksum=dist/${STAGE}.tar.gz.sha256"
+            echo "version=${VERSION}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload CI artifact (manual runs)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshare-macos-arm64
+          path: dist/*.tar.gz*
+
+      - name: Publish GitHub Release (tag pushes)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.stage.outputs.tarball }}
+            ${{ steps.stage.outputs.checksum }}
+          generate_release_notes: true
+          body: |
+            macOS **Apple Silicon** (arm64) build of `screenshare`.
+
+            ### Install
+            ```bash
+            tar -xzf screenshare-${{ steps.stage.outputs.version }}-macos-arm64.tar.gz
+            cd screenshare-${{ steps.stage.outputs.version }}-macos-arm64
+            xattr -dr com.apple.quarantine .     # un-notarized build
+            ./screenshare --help
+            ```
+            `screenshare` and `WebRTC.framework` must stay in the **same folder**
+            (the binary loads the framework via `@loader_path`). The first capture
+            triggers the macOS Screen Recording permission prompt.
+
+            You still need a deployed Worker — see the README for `SCREENSHARE_WORKER`
+            and `SCREENSHARE_TOKEN`.
