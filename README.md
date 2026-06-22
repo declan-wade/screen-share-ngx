@@ -22,59 +22,53 @@ WebRTC signaling.
 | `Sources/screenshare/` | Swift CLI (capture → encode → WHIP publish) |
 | `worker/` | Cloudflare Worker (mints random rooms, serves WHEP viewer page) |
 
-## 1. Deploy the Worker
+## Quick start
 
-The Worker holds your Cloudflare credentials so the CLI never sees them.
+Either way you'll need **Node** (for `wrangler`) and a **Cloudflare account with
+Stream** enabled, plus a **Stream API token** ([create one here](https://dash.cloudflare.com/profile/api-tokens)
+→ Custom token → Account · Stream · Edit). The wizard handles everything else.
 
-```bash
-cd worker
-npm install
+### Option A — prebuilt release (no Swift toolchain)
 
-# Create the KV namespace and paste the printed id into wrangler.toml (ROOMS binding)
-npx wrangler kv namespace create ROOMS
-
-# Edit wrangler.toml: set CF_ACCOUNT_ID under [vars]
-
-# Secrets:
-#  - a Cloudflare API token scoped to Stream:Edit  → https://dash.cloudflare.com/profile/api-tokens
-#  - a shared secret you invent (the CLI must present it)
-npx wrangler secret put CF_STREAM_TOKEN
-npx wrangler secret put SHARED_SECRET
-
-npx wrangler deploy   # prints e.g. https://screenshare.<you>.workers.dev
-```
-
-> Cloudflare Stream must be enabled on the account (the WebRTC WHIP/WHEP beta is
-> part of Stream). Live inputs created here use `recording: off` for lowest latency.
-
-## 2. Build the CLI
-
-Requires macOS 13+ and a Swift 5.10+ toolchain (Xcode 15+ or the Swift toolchain).
+Grab the latest macOS (Apple Silicon) kit from the
+[**Releases**](../../releases/latest) page — it bundles the binary,
+`WebRTC.framework`, the wizard, and the Worker source.
 
 ```bash
-make build      # resolve deps → patch WebRTC headers → swift build -c release
-# binary at .build/release/screenshare
+tar -xzf screenshare-*-macos-arm64.tar.gz
+cd screenshare-*-macos-arm64
+xattr -dr com.apple.quarantine .     # un-notarized build — clear Gatekeeper quarantine
+./scripts/setup.sh                   # interactive wizard — see below
+./screenshare start
 ```
 
-> **Why `make` and not just `swift build`:** the `stasel/WebRTC` v149 binary ships
-> a broken macOS slice — its XCFramework is missing every per-class header, so
-> `import WebRTC` won't compile. `make` runs [`scripts/patch-webrtc-headers.sh`](scripts/patch-webrtc-headers.sh),
-> which reconstructs the macOS headers from the (complete, platform-neutral) iOS
-> slice and regenerates a curated umbrella that omits iOS-only UIKit/EAGL/audio-session
-> headers. Re-run `make patch` after any `swift package clean`.
+### Option B — build from source
 
-First run triggers the **Screen Recording** permission prompt (System Settings →
-Privacy & Security → Screen Recording). Grant it to the terminal/app launching the
-binary, then re-run.
-
-## 3. Go live
+Also requires a Swift 5.10+ toolchain.
 
 ```bash
-export SCREENSHARE_WORKER="https://screenshare.<you>.workers.dev"
-export SCREENSHARE_TOKEN="<the SHARED_SECRET you set>"
-
-.build/release/screenshare start            # capture main display, 60fps, 8Mbps, H.264
+make build      # build the CLI (binary at .build/release/screenshare)
+make setup      # same wizard
+.build/release/screenshare start
 ```
+
+In both cases the wizard ([`scripts/setup.sh`](scripts/setup.sh)):
+
+- logs you into Cloudflare (`wrangler login`) if needed,
+- detects your **account id** and writes it to `wrangler.toml`,
+- creates the **KV namespace** and binds it automatically,
+- **generates** a 256-bit `SHARED_SECRET` (`openssl rand -hex 32`) and stores it as a Worker secret,
+- prompts once for your **Stream API token** (hidden input) and stores it as a secret,
+- **deploys** the Worker and captures its URL,
+- writes `~/.config/screenshare/config.json` so the CLI runs with **no flags or env vars**.
+
+It's safe to re-run (idempotent); pass `--rotate-secret` to mint a fresh secret.
+
+> First capture triggers the macOS **Screen Recording** permission prompt
+> (System Settings → Privacy & Security → Screen Recording). Grant it to the
+> terminal launching the binary, then re-run.
+
+Going live prints:
 
 ```
 ────────────────────────────────────────────────────────────
@@ -96,9 +90,51 @@ Anyone who opens that URL gets the live stream via WHEP in their browser.
 --bitrate <v>     Target bitrate: 8M, 12000k, 6000000. Default 8M.
 --codec <c>       h264 (default, best interop) or h265 (better compression).
 --shows-cursor    Include the cursor.
---worker <url>    Worker base URL (or $SCREENSHARE_WORKER).
---token <secret>  Shared secret (or $SCREENSHARE_TOKEN).
+--worker <url>    Worker base URL (or $SCREENSHARE_WORKER / config file).
+--token <secret>  Shared secret (or $SCREENSHARE_TOKEN / config file).
 ```
+
+Resolution precedence for `--worker`/`--token`: **flag → environment variable →
+`~/.config/screenshare/config.json`** (written by the wizard; override its path
+with `$SCREENSHARE_CONFIG`).
+
+## Advanced / manual setup
+
+The wizard is optional — every step it automates can be done by hand.
+
+**Build internals.** `make build` = resolve deps → patch WebRTC headers →
+`swift build -c release`. The patch ([`scripts/patch-webrtc-headers.sh`](scripts/patch-webrtc-headers.sh))
+works around `stasel/WebRTC` v149's broken macOS slice (missing per-class headers):
+it reconstructs them from the platform-neutral iOS slice and regenerates a curated
+umbrella omitting iOS-only UIKit/EAGL/audio-session headers. Re-run `make patch`
+after any `swift package clean`.
+
+**Manual Worker deploy** (instead of `make setup`):
+
+```bash
+cd worker && npm install
+npx wrangler kv namespace create ROOMS        # paste the id into wrangler.toml (ROOMS binding)
+# set CF_ACCOUNT_ID under [vars] in wrangler.toml
+npx wrangler secret put CF_STREAM_TOKEN        # Cloudflare API token, Stream:Edit
+npx wrangler secret put SHARED_SECRET          # any secret you invent
+npx wrangler deploy                            # prints https://screenshare.<you>.workers.dev
+```
+
+Then either write `~/.config/screenshare/config.json`:
+
+```json
+{ "worker": "https://screenshare.<you>.workers.dev", "token": "<SHARED_SECRET>" }
+```
+
+…or skip the file and export env vars / pass flags per run:
+
+```bash
+export SCREENSHARE_WORKER="https://screenshare.<you>.workers.dev"
+export SCREENSHARE_TOKEN="<SHARED_SECRET>"
+```
+
+> Cloudflare Stream must be enabled on the account (the WebRTC WHIP/WHEP beta is
+> part of Stream). Live inputs use `recording: off` for lowest latency.
 
 ## Releases
 
@@ -109,10 +145,15 @@ Tagging a commit builds and publishes a macOS (Apple Silicon) binary via
 git tag v0.1.0 && git push origin v0.1.0
 ```
 
-The workflow runs the WebRTC header patch, builds the release binary, bundles it
-with `WebRTC.framework` (required — the binary loads it via `@loader_path`),
-ad-hoc signs, and attaches a `.tar.gz` + SHA-256 to the GitHub Release. A manual
-`workflow_dispatch` run produces the same artifact without cutting a release.
+The workflow runs the WebRTC header patch, builds the release binary, and bundles
+a **self-contained kit** — the binary, `WebRTC.framework` (required — loaded via
+`@loader_path`), the setup wizard, and the Worker source (with `wrangler.toml`
+sanitized back to placeholders). It ad-hoc signs, then attaches a `.tar.gz` +
+SHA-256 to the GitHub Release. A manual `workflow_dispatch` run produces the same
+artifact without cutting a release.
+
+Because the kit includes the wizard and Worker source, a downloader needs **no
+repo clone and no Swift toolchain** — just `./scripts/setup.sh` (Option A above).
 
 > The build is **un-notarized**, so consumers must clear quarantine after
 > downloading: `xattr -dr com.apple.quarantine <extracted-folder>`.
@@ -136,9 +177,11 @@ ad-hoc signs, and attaches a `.tar.gz` + SHA-256 to the GitHub Release. A manual
 ## Status
 
 - **CLI: compiles cleanly** (`make build`, Swift 6.2 / macOS SDK) into a 1.7 MB
-  release binary. Argument parsing, subcommands, bitrate parsing and env-var
-  resolution are verified by running the binary. One upstream deprecation warning
-  remains (`setCodecPreferences`), on a working API.
+  release binary. Argument parsing, subcommands, bitrate parsing, and the
+  flag → env → config-file resolution chain are verified by running the binary.
+  One upstream deprecation warning remains (`setCodecPreferences`), on a working API.
+- **Setup wizard: syntax-checked** (`bash -n`, bash-3.2 compatible). The Cloudflare
+  steps need a live account, but its config output is exercised by the CLI tests.
 - **Worker: typechecks cleanly** (`tsc --noEmit`).
 - **Not yet exercised end-to-end here:** the live capture → WHIP → WHEP path needs
   Screen Recording permission, a deployed Worker, and a Cloudflare Stream account —

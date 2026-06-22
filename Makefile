@@ -1,4 +1,9 @@
-.PHONY: build run resolve patch clean
+.PHONY: build run setup resolve patch clean
+
+# Interactive wizard: Cloudflare auth, KV namespace, secret generation, deploy,
+# and CLI config. Run this once after `make build`.
+setup:
+	./scripts/setup.sh
 
 # Resolve deps, apply the WebRTC macOS header workaround, then build release.
 build: resolve patch

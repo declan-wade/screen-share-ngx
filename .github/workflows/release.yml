@@ -72,6 +72,20 @@ jobs:
           cp -R "${BIN_DIR}/WebRTC.framework" "dist/${STAGE}/"
           cp README.md "dist/${STAGE}/" 2>/dev/null || true
 
+          # Ship a self-contained kit: the wizard + Worker source so a binary-only
+          # download can still deploy its own Worker (no repo clone needed).
+          cp -R scripts "dist/${STAGE}/scripts"
+          mkdir -p "dist/${STAGE}/worker/src"
+          cp worker/src/index.ts        "dist/${STAGE}/worker/src/"
+          cp worker/package.json        "dist/${STAGE}/worker/"
+          cp worker/tsconfig.json       "dist/${STAGE}/worker/"
+          # Sanitize wrangler.toml: strip any maintainer account/KV ids back to
+          # placeholders so the wizard fills in the downloader's own values.
+          sed -E \
+            -e 's/(id = ")[0-9a-f]{32}(")/\1<YOUR_NAMESPACE_ID>\2/' \
+            -e 's/(CF_ACCOUNT_ID = ")[0-9a-f]{32}(")/\1<YOUR_ACCOUNT_ID>\2/' \
+            worker/wrangler.toml > "dist/${STAGE}/worker/wrangler.toml"
+
           lipo -info "dist/${STAGE}/screenshare"
 
           # Ad-hoc sign (un-notarized — consumers clear the quarantine flag).
@@ -105,16 +119,18 @@ jobs:
           body: |
             macOS **Apple Silicon** (arm64) build of `screenshare`.
 
+            Self-contained kit — includes the prebuilt binary, `WebRTC.framework`,
+            the setup wizard, and the Worker source. No Swift toolchain needed
+            (you do need Node for `wrangler`, plus a Cloudflare account with Stream).
+
             ### Install
             ```bash
             tar -xzf screenshare-${{ steps.stage.outputs.version }}-macos-arm64.tar.gz
             cd screenshare-${{ steps.stage.outputs.version }}-macos-arm64
             xattr -dr com.apple.quarantine .     # un-notarized build
-            ./screenshare --help
+            ./scripts/setup.sh                   # deploys your Worker + writes config
+            ./screenshare start                  # go live
             ```
             `screenshare` and `WebRTC.framework` must stay in the **same folder**
             (the binary loads the framework via `@loader_path`). The first capture
             triggers the macOS Screen Recording permission prompt.
-
-            You still need a deployed Worker — see the README for `SCREENSHARE_WORKER`
-            and `SCREENSHARE_TOKEN`.

@@ -42,8 +42,11 @@ struct Start: AsyncParsableCommand {
     var showsCursor: Bool = false
 
     func run() async throws {
-        let workerURL = try resolve(worker, env: "SCREENSHARE_WORKER", name: "--worker / $SCREENSHARE_WORKER")
-        let authToken = try resolve(token, env: "SCREENSHARE_TOKEN", name: "--token / $SCREENSHARE_TOKEN")
+        let cfg = AppConfig.load()
+        let workerURL = try resolve(worker, env: "SCREENSHARE_WORKER", config: cfg.worker,
+                                    name: "Worker URL", hint: "run ./scripts/setup.sh, or pass --worker / set $SCREENSHARE_WORKER")
+        let authToken = try resolve(token, env: "SCREENSHARE_TOKEN", config: cfg.token,
+                                    name: "shared secret", hint: "run ./scripts/setup.sh, or pass --token / set $SCREENSHARE_TOKEN")
         let bitrateBps = try parseBitrate(bitrate)
 
         let config = StreamConfig(
@@ -59,10 +62,12 @@ struct Start: AsyncParsableCommand {
         try await runner.start()
     }
 
-    private func resolve(_ value: String?, env: String, name: String) throws -> String {
+    /// Precedence: explicit flag > environment variable > saved config file.
+    private func resolve(_ value: String?, env: String, config: String?, name: String, hint: String) throws -> String {
         if let v = value, !v.isEmpty { return v }
         if let v = ProcessInfo.processInfo.environment[env], !v.isEmpty { return v }
-        throw ValidationError("Missing \(name).")
+        if let v = config, !v.isEmpty { return v }
+        throw ValidationError("Missing \(name) — \(hint).")
     }
 }
 
