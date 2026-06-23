@@ -18,6 +18,16 @@ final class WebRTCPublisher: NSObject, RTCPeerConnectionDelegate, @unchecked Sen
 
     private var iceGatheringComplete: CheckedContinuation<Void, Never>?
 
+    // Frame heartbeat: ScreenCaptureKit stops delivering "complete" frames when
+    // the screen is static, which starves the encoder — so a refreshing/late
+    // viewer can't be sent a keyframe and sees "offline". We retain the last
+    // frame and re-push it at a low floor rate to keep the encoder live.
+    private let frameLock = NSLock()
+    private var lastPixelBuffer: CVPixelBuffer?
+    private var lastDeliverHostNs: UInt64 = 0
+    private var heartbeat: DispatchSourceTimer?
+    private let heartbeatQueue = DispatchQueue(label: "ngx.webrtc.heartbeat", qos: .userInitiated)
+
     init(config: StreamConfig) {
         self.config = config
 
@@ -26,7 +36,10 @@ final class WebRTCPublisher: NSObject, RTCPeerConnectionDelegate, @unchecked Sen
         let decoder = RTCDefaultVideoDecoderFactory()
         self.factory = RTCPeerConnectionFactory(encoderFactory: encoder, decoderFactory: decoder)
 
-        self.videoSource = factory.videoSource()
+        // forScreenCast: true marks the source as screen content — this disables
+        // libwebrtc's camera-oriented quality scaler that otherwise downscales
+        // resolution under CPU/bandwidth pressure (the "half resolution" symptom).
+        self.videoSource = factory.videoSource(forScreenCast: true)
         self.videoTrack = factory.videoTrack(with: videoSource, trackId: "screen0")
         self.capturer = RTCVideoCapturer(delegate: videoSource)
         super.init()
@@ -34,10 +47,38 @@ final class WebRTCPublisher: NSObject, RTCPeerConnectionDelegate, @unchecked Sen
 
     /// Hand a captured frame to the encoder. Called on the capture queue.
     func push(pixelBuffer: CVPixelBuffer, pts: CMTime) {
+        frameLock.lock()
+        lastPixelBuffer = pixelBuffer   // retained, so SCStream won't recycle this surface
+        frameLock.unlock()
+        deliver(pixelBuffer)
+    }
+
+    /// Encode + send one frame. Uses a monotonic host clock for the timestamp so
+    /// real frames and heartbeat re-pushes never go backwards.
+    private func deliver(_ pixelBuffer: CVPixelBuffer) {
         let rtcBuffer = RTCCVPixelBuffer(pixelBuffer: pixelBuffer)
-        let timestampNs = Int64(CMTimeGetSeconds(pts) * Double(NSEC_PER_SEC))
+        let timestampNs = Int64(bitPattern: DispatchTime.now().uptimeNanoseconds)
         let frame = RTCVideoFrame(buffer: rtcBuffer, rotation: ._0, timeStampNs: timestampNs)
         videoSource.capturer(capturer, didCapture: frame)
+        frameLock.lock()
+        lastDeliverHostNs = DispatchTime.now().uptimeNanoseconds
+        frameLock.unlock()
+    }
+
+    /// ~3 fps floor: re-push the last frame if nothing fresh arrived recently.
+    private func startHeartbeat() {
+        let timer = DispatchSource.makeTimerSource(queue: heartbeatQueue)
+        timer.schedule(deadline: .now() + .milliseconds(300), repeating: .milliseconds(300))
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.frameLock.lock()
+            let buf = self.lastPixelBuffer
+            let idleNs = DispatchTime.now().uptimeNanoseconds &- self.lastDeliverHostNs
+            self.frameLock.unlock()
+            if let buf, idleNs > 250_000_000 { self.deliver(buf) }
+        }
+        timer.resume()
+        heartbeat = timer
     }
 
     /// Build the offer SDP to send to the WHIP endpoint.
@@ -74,6 +115,7 @@ final class WebRTCPublisher: NSObject, RTCPeerConnectionDelegate, @unchecked Sen
         // Wait for ICE gathering so the offer we POST is complete (Cloudflare
         // WHIP does not require trickle).
         await waitForIceGathering()
+        startHeartbeat()
         return pc.localDescription?.sdp ?? offer.sdp
     }
 
@@ -88,6 +130,11 @@ final class WebRTCPublisher: NSObject, RTCPeerConnectionDelegate, @unchecked Sen
     }
 
     func close() {
+        heartbeat?.cancel()
+        heartbeat = nil
+        frameLock.lock()
+        lastPixelBuffer = nil
+        frameLock.unlock()
         pc?.close()
         RTCCleanupSSL()
     }
@@ -116,6 +163,9 @@ final class WebRTCPublisher: NSObject, RTCPeerConnectionDelegate, @unchecked Sen
     private func applyBitrate() {
         guard let sender else { return }
         let params = sender.parameters
+        // For screen content, keep resolution sharp and shed frame rate instead
+        // when bandwidth is tight (text stays legible).
+        params.degradationPreference = NSNumber(value: RTCDegradationPreference.maintainResolution.rawValue)
         for encoding in params.encodings {
             encoding.maxBitrateBps = NSNumber(value: config.bitrateBps)
             encoding.maxFramerate = NSNumber(value: config.fps)
@@ -154,7 +204,19 @@ final class WebRTCPublisher: NSObject, RTCPeerConnectionDelegate, @unchecked Sen
     }
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {
-        FileHandle.standardError.write(Data("ICE: \(newState.rawValue)\n".utf8))
+        let label: String
+        switch newState {
+        case .new: label = "new"
+        case .checking: label = "checking"
+        case .connected: label = "connected ✓"
+        case .completed: label = "completed ✓"
+        case .disconnected: label = "DISCONNECTED — stream interrupted, viewers will see offline"
+        case .failed: label = "FAILED — connection lost; restart `screenshare start`"
+        case .closed: label = "closed"
+        case .count: label = "count"
+        @unknown default: label = "state \(newState.rawValue)"
+        }
+        FileHandle.standardError.write(Data("[screenshare] ICE: \(label)\n".utf8))
     }
 
     // Unused delegate callbacks (required by protocol).

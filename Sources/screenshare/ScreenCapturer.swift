@@ -2,6 +2,7 @@ import Foundation
 import ScreenCaptureKit
 import CoreMedia
 import CoreVideo
+import CoreGraphics
 
 /// Captures a single display via ScreenCaptureKit and hands each frame's
 /// CVPixelBuffer to a sink. ScreenCaptureKit delivers IOSurface-backed buffers
@@ -35,8 +36,16 @@ final class ScreenCapturer: NSObject, SCStreamOutput {
         let filter = SCContentFilter(display: display, excludingWindows: [])
 
         let streamConfig = SCStreamConfiguration()
-        streamConfig.width = display.width * 2   // capture at backing-store (Retina) resolution
-        streamConfig.height = display.height * 2
+        // Capture at the display's true framebuffer resolution. CGDisplayMode's
+        // pixel dimensions are correct across Retina/scaled modes (a hardcoded
+        // ×2 over-/under-shoots on non-2x or scaled displays).
+        if let mode = CGDisplayCopyDisplayMode(display.displayID) {
+            streamConfig.width = mode.pixelWidth
+            streamConfig.height = mode.pixelHeight
+        } else {
+            streamConfig.width = display.width * 2
+            streamConfig.height = display.height * 2
+        }
         streamConfig.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(config.fps))
         streamConfig.queueDepth = 6
         streamConfig.showsCursor = config.showsCursor

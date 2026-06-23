@@ -9,7 +9,7 @@ struct ScreenShare: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "screenshare",
         abstract: "Publish a hardware-encoded screen share to a public Cloudflare URL over WebRTC (WHIP/WHEP).",
-        version: "0.1.0",
+        version: "1.0.1",
         subcommands: [Start.self],
         defaultSubcommand: Start.self
     )
